@@ -6,11 +6,10 @@ const { analyzeRSI, formatRSI, getRSIZone } = require('@/lib/rsiAnalyzer');
 const { sendRSIAlert, sendStatusUpdate } = require('@/lib/discordNotifier');
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30; // seconds
+export const maxDuration = 30;
 
 export async function GET(request) {
     try {
-        // ─── Security: Verify cron secret ───
         const { searchParams } = new URL(request.url);
         const secret = searchParams.get('secret');
 
@@ -18,11 +17,10 @@ export async function GET(request) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        // ─── Check if we should force status update ───
         const forceStatus = searchParams.get('status') === '1';
+        const forceAll = searchParams.get('tf') === 'all';
 
-        // ─── Fetch price & RSI data ───
-        const { price, rsiResults } = await fetchAllData();
+        const { price, rsiResults } = await fetchAllData(forceAll);
 
         if (Object.keys(rsiResults).length === 0) {
             return NextResponse.json({
@@ -32,7 +30,6 @@ export async function GET(request) {
             });
         }
 
-        // ─── Analyze each timeframe ───
         const alerts = [];
         const results = {};
 
@@ -47,7 +44,6 @@ export async function GET(request) {
                 datetime: data.datetime,
             };
 
-            // Send alert if overbought or oversold
             if (analysis.signal) {
                 const sent = await sendRSIAlert({
                     price,
@@ -69,7 +65,6 @@ export async function GET(request) {
             }
         }
 
-        // ─── Send status update if requested ───
         if (forceStatus && alerts.length === 0) {
             await sendStatusUpdate(rsiResults, price);
         }
