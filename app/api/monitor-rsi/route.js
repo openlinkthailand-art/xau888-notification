@@ -19,8 +19,9 @@ export async function GET(request) {
 
         const forceStatus = searchParams.get('status') === '1';
         const forceAll = searchParams.get('tf') === 'all';
+        const testMode = searchParams.get('test') === '1';
 
-        const { price, rsiResults } = await fetchAllData(forceAll);
+        const { price, rsiResults } = await fetchAllData(forceAll || testMode);
 
         if (Object.keys(rsiResults).length === 0) {
             return NextResponse.json({
@@ -45,6 +46,7 @@ export async function GET(request) {
             };
 
             if (analysis.signal) {
+                // Real alert — RSI is overbought or oversold
                 const sent = await sendRSIAlert({
                     price,
                     rsi: data.rsi,
@@ -65,6 +67,22 @@ export async function GET(request) {
             }
         }
 
+        // Test mode: always send a status update to Discord so user can verify
+        if (testMode) {
+            await sendStatusUpdate(rsiResults, price);
+            return NextResponse.json({
+                success: true,
+                testMode: true,
+                message: '✅ Test notification sent to Discord!',
+                price: price ? `$${price.toFixed(2)}` : 'N/A',
+                results,
+                alerts,
+                alertCount: alerts.length,
+                timestamp: new Date().toISOString(),
+            });
+        }
+
+        // Force status update if requested and no alerts
         if (forceStatus && alerts.length === 0) {
             await sendStatusUpdate(rsiResults, price);
         }
