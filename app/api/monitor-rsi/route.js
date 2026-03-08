@@ -4,6 +4,7 @@ const { config } = require('@/lib/config');
 const { fetchAllData } = require('@/lib/priceService');
 const { analyzeRSI, formatRSI, getRSIZone } = require('@/lib/rsiAnalyzer');
 const { sendRSIAlert, sendStatusUpdate } = require('@/lib/discordNotifier');
+const { isMarketOpen, getMarketStatus } = require('@/lib/marketHours');
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -35,6 +36,17 @@ export async function GET(request) {
         }
 
         const testMode = searchParams.get('test') === '1';
+
+        // ─── Market hours check: skip everything when closed ───
+        if (!isMarketOpen() && !testMode) {
+            const status = getMarketStatus();
+            return NextResponse.json({
+                success: true,
+                marketOpen: false,
+                message: status.message,
+                timestamp: new Date().toISOString(),
+            });
+        }
 
         const { price, rsiResults } = await fetchAllData();
 
