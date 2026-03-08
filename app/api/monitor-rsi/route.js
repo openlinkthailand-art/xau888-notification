@@ -8,6 +8,23 @@ const { sendRSIAlert, sendStatusUpdate } = require('@/lib/discordNotifier');
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
+/**
+ * Cooldown tracker — persists across warm invocations
+ * Cron hits every 2 min so instance stays warm = cooldown works reliably
+ */
+let lastAlertTimestamp = 0;
+let lastAlertSignal = '';
+
+function isCooldownActive() {
+    const elapsed = Date.now() - lastAlertTimestamp;
+    return elapsed < config.alertCooldownMs;
+}
+
+function recordAlert(signal) {
+    lastAlertTimestamp = Date.now();
+    lastAlertSignal = signal;
+}
+
 export async function GET(request) {
     try {
         const { searchParams } = new URL(request.url);
@@ -17,11 +34,9 @@ export async function GET(request) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const forceStatus = searchParams.get('status') === '1';
-        const forceAll = searchParams.get('tf') === 'all';
         const testMode = searchParams.get('test') === '1';
 
-        const { price, rsiResults } = await fetchAllData(forceAll || testMode);
+        const { price, rsiResults } = await fetchAllData();
 
         if (Object.keys(rsiResults).length === 0) {
             return NextResponse.json({
@@ -33,10 +48,13 @@ export async function GET(request) {
 
         const alerts = [];
         const results = {};
+        const cooldownActive = isCooldownActive();
+        const cooldownRemainingSec = cooldownActive
+            ? Math.ceil((config.alertCooldownMs - (Date.now() - lastAlertTimestamp)) / 1000)
+            : 0;
 
         for (const [interval, data] of Object.entries(rsiResults)) {
             const analysis = analyzeRSI(data.rsi);
-            const tfLabel = interval === '1min' ? '1 นาที' : '5 นาที';
 
             results[interval] = {
                 rsi: formatRSI(data.rsi),
@@ -46,28 +64,45 @@ export async function GET(request) {
             };
 
             if (analysis.signal) {
-                // Real alert — RSI is overbought or oversold
-                const sent = await sendRSIAlert({
-                    price,
-                    rsi: data.rsi,
-                    interval,
-                    signal: analysis.signal,
-                    description: analysis.description,
-                    color: analysis.color,
-                    emoji: analysis.emoji,
-                    datetime: data.datetime,
-                });
+                if (cooldownActive) {
+                    // Skip alert — cooldown active
+                    alerts.push({
+                        timeframe: interval,
+                        signal: analysis.signal,
+                        rsi: formatRSI(data.rsi),
+                        sent: false,
+                        skipped: true,
+                        reason: `Cooldown active (${cooldownRemainingSec}s remaining)`,
+                    });
+                } else {
+                    // Send alert!
+                    const sent = await sendRSIAlert({
+                        price,
+                        rsi: data.rsi,
+                        interval,
+                        signal: analysis.signal,
+                        description: analysis.description,
+                        color: analysis.color,
+                        emoji: analysis.emoji,
+                        datetime: data.datetime,
+                    });
 
-                alerts.push({
-                    timeframe: tfLabel,
-                    signal: analysis.signal,
-                    rsi: formatRSI(data.rsi),
-                    sent,
-                });
+                    if (sent) {
+                        recordAlert(analysis.signal);
+                    }
+
+                    alerts.push({
+                        timeframe: interval,
+                        signal: analysis.signal,
+                        rsi: formatRSI(data.rsi),
+                        sent,
+                        skipped: false,
+                    });
+                }
             }
         }
 
-        // Test mode: always send a status update to Discord so user can verify
+        // Test mode: always send status to Discord
         if (testMode) {
             await sendStatusUpdate(rsiResults, price);
             return NextResponse.json({
@@ -77,14 +112,13 @@ export async function GET(request) {
                 price: price ? `$${price.toFixed(2)}` : 'N/A',
                 results,
                 alerts,
-                alertCount: alerts.length,
+                cooldown: {
+                    active: cooldownActive,
+                    remainingSec: cooldownRemainingSec,
+                    lastSignal: lastAlertSignal || 'none',
+                },
                 timestamp: new Date().toISOString(),
             });
-        }
-
-        // Force status update if requested and no alerts
-        if (forceStatus && alerts.length === 0) {
-            await sendStatusUpdate(rsiResults, price);
         }
 
         return NextResponse.json({
@@ -92,7 +126,12 @@ export async function GET(request) {
             price: price ? `$${price.toFixed(2)}` : 'N/A',
             results,
             alerts,
-            alertCount: alerts.length,
+            alertCount: alerts.filter(a => a.sent).length,
+            cooldown: {
+                active: cooldownActive,
+                remainingSec: cooldownRemainingSec,
+                lastSignal: lastAlertSignal || 'none',
+            },
             timestamp: new Date().toISOString(),
         });
 
